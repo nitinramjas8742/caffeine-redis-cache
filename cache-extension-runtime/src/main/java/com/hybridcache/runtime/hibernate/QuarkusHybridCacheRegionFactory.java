@@ -1,4 +1,4 @@
-package com.hybridcache.runtime;
+package com.hybridcache.runtime.hibernate;
 
 import java.util.Map;
 
@@ -13,11 +13,7 @@ import org.hibernate.engine.spi.SessionFactoryImplementor;
 import org.jboss.logging.Logger;
 
 import com.hybridcache.runtime.config.HybridCacheConfig;
-import com.hybridcache.runtime.storage.CaffeineStorageAccess;
-import com.hybridcache.runtime.storage.DomainDataTimestampsRedisStorage;
-import com.hybridcache.runtime.storage.DomainQueryTimestampsRedisStorage;
-import com.hybridcache.runtime.storage.NaturalIdTimestampsRedisStorage;
-import com.hybridcache.runtime.storage.QuarkusDistributedTimestampMap;
+import com.hybridcache.runtime.nearcache.QuarkusDistributedTimestampMap;
 
 import io.smallrye.config.SmallRyeConfig;
 

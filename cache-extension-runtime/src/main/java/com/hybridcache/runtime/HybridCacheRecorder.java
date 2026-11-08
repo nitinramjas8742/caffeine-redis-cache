@@ -17,6 +17,8 @@ import io.quarkus.hibernate.orm.runtime.integration.HibernateOrmIntegrationRunti
 import io.quarkus.hibernate.orm.runtime.integration.HibernateOrmIntegrationStaticInitListener;
 import io.quarkus.runtime.annotations.Recorder;
 
+import com.hybridcache.runtime.hibernate.QuarkusHybridCacheRegionFactory;
+
 /**
  * Contributes the Hibernate ORM properties that install
  * {@link QuarkusHybridCacheRegionFactory} as the second-level cache region factory.

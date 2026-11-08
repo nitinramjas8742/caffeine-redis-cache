@@ -1,4 +1,4 @@
-package com.hybridcache.runtime.storage;
+package com.hybridcache.runtime.nearcache;
 
 import io.quarkus.redis.datasource.ReactiveRedisDataSource;
 import io.quarkus.redis.datasource.RedisDataSource;

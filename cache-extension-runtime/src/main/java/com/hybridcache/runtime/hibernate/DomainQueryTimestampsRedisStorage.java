@@ -1,14 +1,16 @@
-package com.hybridcache.runtime.storage;
+package com.hybridcache.runtime.hibernate;
+
+import com.hybridcache.runtime.nearcache.TimestampRegistry;
 
 import org.hibernate.cache.spi.support.StorageAccess;
 import org.hibernate.engine.spi.SharedSessionContractImplementor;
 
 public class DomainQueryTimestampsRedisStorage implements StorageAccess {
 
-    private final QuarkusDistributedTimestampMap remoteKeyTimestampCache;
+    private final TimestampRegistry remoteKeyTimestampCache;
     private final StorageAccess localDataStorage;
 
-    public DomainQueryTimestampsRedisStorage(QuarkusDistributedTimestampMap remoteKeyTimestampCache,
+    public DomainQueryTimestampsRedisStorage(TimestampRegistry remoteKeyTimestampCache,
                                              StorageAccess localDataStorage) {
         this.remoteKeyTimestampCache = remoteKeyTimestampCache;
         this.localDataStorage = localDataStorage;

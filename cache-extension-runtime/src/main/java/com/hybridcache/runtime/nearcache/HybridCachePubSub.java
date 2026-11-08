@@ -1,4 +1,4 @@
-package com.hybridcache.runtime.storage;
+package com.hybridcache.runtime.nearcache;
 
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;

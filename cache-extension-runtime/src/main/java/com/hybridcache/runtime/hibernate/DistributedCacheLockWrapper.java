@@ -1,4 +1,4 @@
-package com.hybridcache.runtime.storage;
+package com.hybridcache.runtime.hibernate;
 
 public class DistributedCacheLockWrapper {
     private final Object lock;

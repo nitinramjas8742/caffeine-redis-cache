@@ -1,4 +1,6 @@
-package com.hybridcache.runtime.storage;
+package com.hybridcache.runtime.hibernate;
+
+import com.hybridcache.runtime.nearcache.TimestampRegistry;
 
 import org.hibernate.cache.spi.access.SoftLock;
 import org.hibernate.cache.spi.support.DomainDataStorageAccess;
@@ -14,7 +16,7 @@ public abstract class AbstractTimestampAwareStorage implements DomainDataStorage
     private static final Logger LOG = Logger.getLogger(AbstractTimestampAwareStorage.class);
 
     protected final String regionName;
-    protected final QuarkusDistributedTimestampMap remoteKeyTimestampCache;
+    protected final TimestampRegistry remoteKeyTimestampCache;
     protected final StorageAccess localDataStorage;
 
     /**
@@ -32,7 +34,7 @@ public abstract class AbstractTimestampAwareStorage implements DomainDataStorage
     private final Set<String> locallyLockedKeys = ConcurrentHashMap.newKeySet();
 
     public AbstractTimestampAwareStorage(String regionName,
-                                         QuarkusDistributedTimestampMap remoteKeyTimestampCache,
+                                         TimestampRegistry remoteKeyTimestampCache,
                                          StorageAccess localDataStorage) {
         this.regionName = regionName;
         this.remoteKeyTimestampCache = remoteKeyTimestampCache;

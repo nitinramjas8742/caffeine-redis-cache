@@ -28,6 +28,17 @@ write → SoftLock marker in Redis → commit → HSET timestamp + PUBLISH inval
 | `cache-extension-deployment` | Build-time wiring with Quarkus and Hibernate ORM |
 | `application` | Demo Quarkus app and integration tests |
 
+### Runtime package layout
+
+| Package | Contents |
+|---|---|
+| `com.hybridcache.runtime.nearcache` | Distributed timestamp map, pub/sub subscriber, Redis provider, `TimestampRegistry` — **no Hibernate imports** |
+| `com.hybridcache.runtime.hibernate` | Hibernate ORM integration: region factory, storage adapters, Caffeine payload tier, lock wrapper |
+| `com.hybridcache.runtime.config` | `@ConfigMapping` configuration (`quarkus.hybrid-cache.*`) |
+
+The `nearcache` package only exposes `TimestampRegistry` to the Hibernate layer, so it
+can be extracted into a standalone extension later without touching the cache provider.
+
 ## Requirements
 
 - Java 21

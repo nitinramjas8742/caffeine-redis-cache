@@ -1,4 +1,4 @@
-package com.hybridcache.runtime.storage;
+package com.hybridcache.runtime.nearcache;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -36,7 +36,7 @@ import java.util.function.Consumer;
  * {@code NONE}, the near-cache can serve a stale value until the entry is invalidated
  * or the node reconnects with a clearing strategy.
  */
-public class QuarkusDistributedTimestampMap {
+public class QuarkusDistributedTimestampMap implements TimestampRegistry {
 
     private static final Logger LOG = Logger.getLogger(QuarkusDistributedTimestampMap.class);
     private static final String CLEAR_ALL = "CLEAR_ALL_CACHE";

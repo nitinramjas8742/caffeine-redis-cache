@@ -5,9 +5,9 @@ import java.util.List;
 import org.jboss.logging.Logger;
 
 import com.hybridcache.runtime.HybridCacheRecorder;
-import com.hybridcache.runtime.QuarkusHybridCacheRegionFactory;
-import com.hybridcache.runtime.storage.HybridCachePubSub;
-import com.hybridcache.runtime.storage.HybridCacheRedisProvider;
+import com.hybridcache.runtime.hibernate.QuarkusHybridCacheRegionFactory;
+import com.hybridcache.runtime.nearcache.HybridCachePubSub;
+import com.hybridcache.runtime.nearcache.HybridCacheRedisProvider;
 
 import io.quarkus.arc.deployment.AdditionalBeanBuildItem;
 import io.quarkus.arc.deployment.UnremovableBeanBuildItem;

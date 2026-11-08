@@ -1,8 +1,8 @@
 package com.example.app;
 
-import com.hybridcache.runtime.storage.CaffeineStorageAccess;
-import com.hybridcache.runtime.storage.DomainDataTimestampsRedisStorage;
-import com.hybridcache.runtime.storage.QuarkusDistributedTimestampMap;
+import com.hybridcache.runtime.hibernate.CaffeineStorageAccess;
+import com.hybridcache.runtime.hibernate.DomainDataTimestampsRedisStorage;
+import com.hybridcache.runtime.nearcache.QuarkusDistributedTimestampMap;
 
 import org.hibernate.cache.spi.access.SoftLock;
 import org.junit.jupiter.api.Test;
