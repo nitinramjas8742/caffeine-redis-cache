@@ -1,0 +1,5 @@
+rootProject.name = 'fun-3'
+
+include 'application'
+include 'cache-extension-runtime'
+include 'cache-extension-deployment'

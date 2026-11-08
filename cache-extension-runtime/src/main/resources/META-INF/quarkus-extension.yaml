@@ -1,0 +1,12 @@
+name: "Hybrid Distributed Second-Level Cache"
+description: "Two-tier (local Caffeine + Redis-coordinated) Hibernate ORM second-level cache for Quarkus."
+metadata:
+  keywords:
+    - "hibernate"
+    - "second-level-cache"
+    - "cache"
+    - "redis"
+    - "caffeine"
+  categories:
+    - "data"
+  status: "experimental"

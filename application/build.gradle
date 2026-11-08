@@ -1,0 +1,20 @@
+plugins {
+    id 'java'
+    id 'io.quarkus' version '3.37.0'
+}
+
+dependencies {
+    implementation enforcedPlatform("io.quarkus.platform:quarkus-bom:3.37.0")
+
+    // Standard application dependencies
+    implementation 'io.quarkus:quarkus-hibernate-orm-panache'
+    implementation 'io.quarkus:quarkus-jdbc-h2'
+    implementation 'io.quarkus:quarkus-rest'
+    implementation 'io.quarkus:quarkus-rest-jackson'
+
+    // Depend ONLY on the runtime extension
+    implementation project(':cache-extension-runtime')
+
+    testImplementation 'io.quarkus:quarkus-junit5'
+    testImplementation 'io.rest-assured:rest-assured'
+}

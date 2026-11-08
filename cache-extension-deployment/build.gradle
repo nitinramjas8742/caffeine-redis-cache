@@ -1,0 +1,33 @@
+plugins {
+    id 'java'
+    id 'maven-publish'
+}
+
+description = 'Hybrid distributed second-level cache - deployment (build-time) module'
+
+dependencies {
+    implementation platform("io.quarkus.platform:quarkus-bom:3.37.0")
+
+    // Build-time APIs.
+    implementation 'io.quarkus:quarkus-core-deployment'
+    implementation 'io.quarkus:quarkus-arc-deployment'
+
+    // Hibernate ORM build items used to hook into the persistence unit boot.
+    implementation 'io.quarkus:quarkus-hibernate-orm-deployment'
+
+    // Deployment module of the Redis client: without it the RedisDataSource
+    // bean is never produced at runtime.
+    implementation 'io.quarkus:quarkus-redis-client-deployment'
+
+    // Must depend on the runtime module
+    implementation project(':cache-extension-runtime')
+}
+
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            from components.java
+            artifactId = 'cache-extension-deployment'
+        }
+    }
+}

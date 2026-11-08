@@ -1,0 +1,43 @@
+plugins {
+    id 'java'
+    id 'maven-publish'
+    id 'io.quarkus.extension' version '3.37.0'
+}
+
+description = 'Hybrid distributed second-level cache - runtime module'
+
+quarkusExtension {
+    // Gradle project name of the deployment module (see settings.gradle).
+    deploymentModule = 'cache-extension-deployment'
+    // Quarkus Gradle extension plugin 3.37.0 derives the default artifactId from the
+    // runtime project name ("cache-extension-runtime-deployment"), so declare the
+    // real deployment artifact explicitly.
+    deploymentArtifact = "${group}:${project(':cache-extension-deployment').name}:${version}"
+}
+
+dependencies {
+    implementation platform("io.quarkus.platform:quarkus-bom:3.37.0")
+
+    // Core Quarkus & Hibernate dependencies
+    implementation 'io.quarkus:quarkus-core'
+    implementation 'io.quarkus:quarkus-arc'
+    implementation 'io.quarkus:quarkus-hibernate-orm'
+
+    // Native Quarkus Redis Client
+    implementation 'io.quarkus:quarkus-redis-client'
+
+    // Caffeine for local payload storage
+    implementation 'com.github.ben-manes.caffeine:caffeine'
+
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            from components.java
+            artifactId = 'cache-extension-runtime'
+        }
+    }
+}

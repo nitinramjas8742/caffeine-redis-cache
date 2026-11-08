@@ -1,0 +1,43 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+gradle-app.setting
+
+# Quarkus
+.quarkus/
+*.quarkus/
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.classpath
+.project
+
+# Java
+*.class
+*.log
+hs_err_pid*
+replay_pid*
+out/
+bin/
+
+# Redis
+dump.rdb
+*.aof
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Env / secrets
+.env
+.env.*
+*.pem
+*.p12
+*.jks

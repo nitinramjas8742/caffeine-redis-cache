@@ -1,0 +1,33 @@
+/*
+ * Root build script.
+ *
+ * Declares shared coordinates and the repositories every module needs.
+ * Without this file Gradle has no repositories and dependency resolution fails.
+ */
+allprojects {
+    group = 'com.example'
+    version = '1.0.0-SNAPSHOT'
+
+    repositories {
+        mavenCentral()
+    }
+}
+
+subprojects {
+    apply plugin: 'java'
+
+    java {
+        toolchain {
+            languageVersion = JavaLanguageVersion.of(21)
+        }
+    }
+
+    tasks.withType(JavaCompile).configureEach {
+        options.encoding = 'UTF-8'
+        options.compilerArgs << '-parameters'
+    }
+
+    tasks.withType(Test).configureEach {
+        useJUnitPlatform()
+    }
+}
