@@ -5,7 +5,7 @@
  * Without this file Gradle has no repositories and dependency resolution fails.
  */
 allprojects {
-    group = 'com.example'
+    group = 'com.hybridcache'
     version = '1.0.0-SNAPSHOT'
 
     repositories {

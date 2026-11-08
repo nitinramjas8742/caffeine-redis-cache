@@ -2,11 +2,12 @@ package com.hybridcache.deployment;
 
 import java.util.List;
 
-import org.jboss.jandex.DotName;
 import org.jboss.logging.Logger;
 
 import com.hybridcache.runtime.HybridCacheRecorder;
 import com.hybridcache.runtime.QuarkusHybridCacheRegionFactory;
+import com.hybridcache.runtime.storage.HybridCachePubSub;
+import com.hybridcache.runtime.storage.HybridCacheRedisProvider;
 
 import io.quarkus.arc.deployment.AdditionalBeanBuildItem;
 import io.quarkus.arc.deployment.UnremovableBeanBuildItem;
@@ -19,6 +20,8 @@ import io.quarkus.deployment.builditem.nativeimage.ReflectiveClassBuildItem;
 import io.quarkus.hibernate.orm.deployment.PersistenceUnitDescriptorBuildItem;
 import io.quarkus.hibernate.orm.deployment.integration.HibernateOrmIntegrationRuntimeConfiguredBuildItem;
 import io.quarkus.hibernate.orm.deployment.integration.HibernateOrmIntegrationStaticConfiguredBuildItem;
+import io.quarkus.redis.datasource.ReactiveRedisDataSource;
+import io.quarkus.redis.datasource.RedisDataSource;
 
 public class HybridCacheProcessor {
 
@@ -76,8 +79,8 @@ public class HybridCacheProcessor {
     @BuildStep
     UnremovableBeanBuildItem keepRedisClientBeans() {
         return UnremovableBeanBuildItem.beanTypes(
-                DotName.createSimple("io.quarkus.redis.datasource.RedisDataSource"),
-                DotName.createSimple("io.quarkus.redis.datasource.ReactiveRedisDataSource"));
+                RedisDataSource.class,
+                ReactiveRedisDataSource.class);
     }
 
     /**
@@ -89,20 +92,17 @@ public class HybridCacheProcessor {
     @BuildStep
     AdditionalBeanBuildItem registerRedisProvider() {
         return AdditionalBeanBuildItem.builder()
-                .addBeanClasses(
-                        "com.hybridcache.runtime.storage.HybridCacheRedisProvider",
-                        "com.hybridcache.runtime.storage.HybridCachePubSub")
+                .addBeanClasses(HybridCacheRedisProvider.class, HybridCachePubSub.class)
                 .setUnremovable()
                 .build();
     }
 
     @BuildStep
     ReflectiveClassBuildItem registerForReflection() {
-        // Ensures GraalVM native image compilation doesn't strip out our factory class
-        return ReflectiveClassBuildItem.builder(QuarkusHybridCacheRegionFactory.class.getName())
+        // Hibernate instantiates the region factory by reflection; nothing else needs
+        // to be registered, so keep the native-image footprint minimal.
+        return ReflectiveClassBuildItem.builder(QuarkusHybridCacheRegionFactory.class)
                 .constructors()
-                .methods()
-                .fields()
                 .build();
     }
 }

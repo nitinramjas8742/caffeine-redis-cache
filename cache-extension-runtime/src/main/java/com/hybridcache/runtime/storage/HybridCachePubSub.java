@@ -13,6 +13,8 @@ import java.util.function.Consumer;
 
 import org.jboss.logging.Logger;
 
+import com.hybridcache.runtime.config.HybridCacheConfig;
+
 import io.quarkus.redis.datasource.ReactiveRedisDataSource;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -68,22 +70,6 @@ public class HybridCachePubSub {
     private static final String RECONNECT_LIVE_CLEAR = "__reconnect_live__|CLEAR_ALL_CACHE";
     private static final String HEARTBEAT_REGION = "__heartbeat__";
 
-    private static final long RECONNECT_DELAY_MS =
-            Long.getLong("hybridcache.pubsub.reconnect-delay-ms", 2_000L);
-    private static final long HEARTBEAT_INTERVAL_MS =
-            Long.getLong("hybridcache.pubsub.heartbeat-interval-ms", 2_000L);
-    private static final long HEARTBEAT_TIMEOUT_MS =
-            Long.getLong("hybridcache.pubsub.heartbeat-timeout-ms", 6_000L);
-
-    /**
-     * Redisson's {@code ReconnectionStrategy.CLEAR}: after the pub/sub topic comes
-     * back, drop the local near-cache so updates missed during the outage are
-     * re-read from Redis. Set to {@code false} to keep the raw
-     * {@code ReconnectionStrategy.NONE} behaviour.
-     */
-    private static final boolean CLEAR_ON_RECONNECT = Boolean.parseBoolean(
-            System.getProperty("hybridcache.pubsub.clear-on-reconnect", "true"));
-
     private final ConcurrentHashMap<String, List<Consumer<String>>> listeners = new ConcurrentHashMap<>();
     private final AtomicBoolean reconnectScheduled = new AtomicBoolean();
     /** Invalidates callbacks from an older subscription attempt. */
@@ -116,12 +102,29 @@ public class HybridCachePubSub {
     @Inject
     ReactiveRedisDataSource reactiveRedis;
 
+    @Inject
+    HybridCacheConfig config;
+
+    private long reconnectDelayMs;
+    private long heartbeatIntervalMs;
+    private long heartbeatTimeoutMs;
+    /**
+     * Redisson's {@code ReconnectionStrategy.CLEAR}: after the pub/sub topic comes
+     * back, drop the local near-cache so updates missed during the outage are
+     * re-read from Redis.
+     */
+    private boolean clearOnReconnect;
+
     @PostConstruct
     void start() {
+        reconnectDelayMs = config.pubsub().reconnectDelayMs();
+        heartbeatIntervalMs = config.pubsub().heartbeatIntervalMs();
+        heartbeatTimeoutMs = config.pubsub().heartbeatTimeoutMs();
+        clearOnReconnect = config.pubsub().clearOnReconnect();
         heartbeatTask = scheduler.scheduleAtFixedRate(
                 this::heartbeat,
-                HEARTBEAT_INTERVAL_MS,
-                HEARTBEAT_INTERVAL_MS,
+                heartbeatIntervalMs,
+                heartbeatIntervalMs,
                 TimeUnit.MILLISECONDS);
     }
 
@@ -187,12 +190,12 @@ public class HybridCachePubSub {
             recoveryClearPending = true;
             if (failure != null) {
                 LOG.warnf("Redis pub/sub connection lost: %s. Reconnecting in %d ms.",
-                        failure.toString(), RECONNECT_DELAY_MS);
+                        failure.toString(), reconnectDelayMs);
             } else {
                 LOG.warnf("Redis pub/sub subscription ended. Reconnecting in %d ms.",
-                        RECONNECT_DELAY_MS);
+                        reconnectDelayMs);
             }
-            if (CLEAR_ON_RECONNECT) {
+            if (clearOnReconnect) {
                 LOG.warn("Redis pub/sub gap detected; clearing local near-caches once to recover "
                         + "invalidation messages missed during the outage.");
                 clearAllRegions(RECONNECT_CLEAR);
@@ -211,7 +214,7 @@ public class HybridCachePubSub {
         scheduler.schedule(() -> {
             reconnectScheduled.set(false);
             ensureSubscribed();
-        }, RECONNECT_DELAY_MS, TimeUnit.MILLISECONDS);
+        }, reconnectDelayMs, TimeUnit.MILLISECONDS);
     }
 
     /**
@@ -225,9 +228,9 @@ public class HybridCachePubSub {
         }
         long generation = subscriptionGeneration.get();
         long now = System.currentTimeMillis();
-        if (now - lastHeartbeatAckAt > HEARTBEAT_TIMEOUT_MS) {
+        if (now - lastHeartbeatAckAt > heartbeatTimeoutMs) {
             onSubscriptionEnded(generation, new IllegalStateException(
-                    "pub/sub heartbeat timed out after " + HEARTBEAT_TIMEOUT_MS + " ms"));
+                    "pub/sub heartbeat timed out after " + heartbeatTimeoutMs + " ms"));
             return;
         }
         String token = HEARTBEAT_REGION + '|' + instanceId() + '|' + System.nanoTime();
@@ -278,7 +281,7 @@ public class HybridCachePubSub {
             if (recoveryClearPending) {
                 recoveryClearPending = false;
                 outage = false;
-                if (CLEAR_ON_RECONNECT) {
+                if (clearOnReconnect) {
                     LOG.warn("Redis pub/sub reconnected; clearing local near-caches once more so "
                             + "entries cached during the outage are revalidated.");
                     clearAllRegions(RECONNECT_LIVE_CLEAR);

@@ -5,15 +5,31 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import org.hibernate.cache.spi.support.StorageAccess;
 import org.hibernate.engine.spi.SharedSessionContractImplementor;
 
+/**
+ * Local payload tier backed by Caffeine with Window TinyLFU eviction.
+ * <p>
+ * The cache is bounded by entry count; use {@code quarkus.hybrid-cache.storage.maximum-size}
+ * to size it for the working set and {@code storage.record-stats} to expose hit/miss
+ * counters.
+ */
 public class CaffeineStorageAccess implements StorageAccess {
+
+    /** Kept so payload caches can still be created programmatically (tests, SPI users). */
+    public static final long DEFAULT_MAXIMUM_SIZE = 10_000L;
 
     private final Cache<Object, Object> cache;
 
     public CaffeineStorageAccess() {
-        // You can later make this maximumSize configurable via Quarkus properties
-        this.cache = Caffeine.newBuilder()
-                .maximumSize(10000)
-                .build();
+        this(DEFAULT_MAXIMUM_SIZE, false);
+    }
+
+    public CaffeineStorageAccess(long maximumSize, boolean recordStats) {
+        Caffeine<Object, Object> builder = Caffeine.newBuilder()
+                .maximumSize(Math.max(1L, maximumSize));
+        if (recordStats) {
+            builder.recordStats();
+        }
+        this.cache = builder.build();
     }
 
     @Override
