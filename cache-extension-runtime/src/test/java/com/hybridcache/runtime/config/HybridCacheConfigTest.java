@@ -26,9 +26,7 @@ class HybridCacheConfigTest {
         assertEquals(2_000L, config.pubsub().reconnectDelayMs());
         assertEquals(2_000L, config.pubsub().heartbeatIntervalMs());
         assertEquals(6_000L, config.pubsub().heartbeatTimeoutMs());
-        assertTrue(config.pubsub().clearOnReconnect());
 
-        assertEquals(ReconnectionStrategy.NONE, config.nearCache().reconnectionStrategy());
         assertEquals(0L, config.nearCache().ttlMs());
         assertEquals(8_000L, config.nearCache().recoveryGraceMs());
 
@@ -43,7 +41,6 @@ class HybridCacheConfigTest {
         HybridCacheConfig config = config(Map.of(
                 "quarkus.hybrid-cache.pubsub.enabled", "false",
                 "quarkus.hybrid-cache.pubsub.reconnect-delay-ms", "1500",
-                "quarkus.hybrid-cache.near-cache.reconnection-strategy", "CLEAR",
                 "quarkus.hybrid-cache.near-cache.ttl-ms", "30000",
                 "quarkus.hybrid-cache.near-cache.recovery-grace-ms", "0",
                 "quarkus.hybrid-cache.redis.retry-delay-ms", "1000",
@@ -52,7 +49,6 @@ class HybridCacheConfigTest {
 
         assertFalse(config.pubsub().enabled());
         assertEquals(1_500L, config.pubsub().reconnectDelayMs());
-        assertEquals(ReconnectionStrategy.CLEAR, config.nearCache().reconnectionStrategy());
         assertEquals(30_000L, config.nearCache().ttlMs());
         assertEquals(0L, config.nearCache().recoveryGraceMs());
         assertEquals(1_000L, config.redis().retryDelayMs());

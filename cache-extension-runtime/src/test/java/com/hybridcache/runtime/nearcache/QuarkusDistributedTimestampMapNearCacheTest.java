@@ -13,7 +13,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
  * Verifies that {@link QuarkusDistributedTimestampMap} behaves like Redisson's
  * {@code RLocalCachedMap} with {@code LocalCachedMapOptions.defaults()}:
  * local mirror on the hot path, Redis only on a local miss, no negative caching,
- * pub/sub invalidation, and the reconnection strategies.
+ * pub/sub invalidation, and always-clear recovery.
  *
  * <p>A simulated Redis backend is used so the semantics can be tested without a
  * running server; the production code paths (local mirror, invalidation, strategy)
@@ -33,14 +33,13 @@ class QuarkusDistributedTimestampMapNearCacheTest {
         boolean available = true;
         int reads = 0;
 
-        SimulatedMap(String region, Map<String, String> redisStore, String reconnectionStrategy) {
-            super(region, reconnectionStrategy);
+        SimulatedMap(String region, Map<String, String> redisStore) {
+            super(region);
             this.redisStore = redisStore;
         }
 
-        SimulatedMap(String region, Map<String, String> redisStore,
-                     String reconnectionStrategy, long nearCacheTtlMs) {
-            super(region, reconnectionStrategy, nearCacheTtlMs);
+        SimulatedMap(String region, Map<String, String> redisStore, long nearCacheTtlMs) {
+            super(region, nearCacheTtlMs);
             this.redisStore = redisStore;
         }
 
@@ -98,14 +97,14 @@ class QuarkusDistributedTimestampMapNearCacheTest {
 
     private final Map<String, String> redis = new ConcurrentHashMap<>();
 
-    private SimulatedMap map(String strategy) {
-        return new SimulatedMap("test.region", redis, strategy);
+    private SimulatedMap map() {
+        return new SimulatedMap("test.region", redis);
     }
 
     @Test
     void repeatedReadsUseTheLocalMirrorWithoutRedis() {
         redis.put("key", "100");
-        SimulatedMap map = map("NONE");
+        SimulatedMap map = map();
 
         assertEquals(100L, map.getRemote("key"));
         assertEquals(1, map.reads);
@@ -121,7 +120,7 @@ class QuarkusDistributedTimestampMapNearCacheTest {
     @Test
     void invalidationForcesTheNextReadToRefreshFromRedis() {
         redis.put("key", "100");
-        SimulatedMap map = map("NONE");
+        SimulatedMap map = map();
         assertEquals(100L, map.getRemote("key"));
 
         redis.put("key", "200");
@@ -136,7 +135,7 @@ class QuarkusDistributedTimestampMapNearCacheTest {
     void clearInvalidationDropsEveryLocalEntry() {
         redis.put("a", "1");
         redis.put("b", "2");
-        SimulatedMap map = map("NONE");
+        SimulatedMap map = map();
         assertEquals(1L, map.getRemote("a"));
         assertEquals(2L, map.getRemote("b"));
 
@@ -151,7 +150,7 @@ class QuarkusDistributedTimestampMapNearCacheTest {
 
     @Test
     void missesAreNotCached() {
-        SimulatedMap map = map("NONE");
+        SimulatedMap map = map();
 
         assertNull(map.getRemote("key"));
         assertEquals(1, map.reads);
@@ -164,7 +163,7 @@ class QuarkusDistributedTimestampMapNearCacheTest {
 
     @Test
     void putWritesThroughAndUpdatesTheLocalMirror() {
-        SimulatedMap map = map("NONE");
+        SimulatedMap map = map();
 
         map.put("key", 42L);
         assertEquals("42", redis.get("key"), "put must write through to Redis");
@@ -178,7 +177,7 @@ class QuarkusDistributedTimestampMapNearCacheTest {
     @Test
     void removeDeletesRemoteAndLocalEntries() {
         redis.put("key", "1");
-        SimulatedMap map = map("NONE");
+        SimulatedMap map = map();
         assertEquals(1L, map.getRemote("key"));
 
         map.remove("key");
@@ -189,70 +188,31 @@ class QuarkusDistributedTimestampMapNearCacheTest {
     }
 
     @Test
-    void reconnectionStrategyNoneRevalidatesDuringTheRecoveryGraceWindow() {
+    void reconnectAlwaysClearsTheLocalMirror() {
         redis.put("key", "100");
-        SimulatedMap map = map("NONE");
+        SimulatedMap map = map();
         assertEquals(100L, map.getRemote("key"));
 
         map.available = false;
-        // A local miss fails against Redis and marks the connection as down.
+        // A read against the unavailable backend marks the connection as down.
         assertNull(map.getRemote("missing"));
 
-        // The value changes during the outage.
+        // The value changes during the outage: another node wrote the database, but
+        // its timestamp never reached Redis while the data connection was down.
         redis.put("key", "200");
         map.available = true;
 
-        // Any successful Redis call detects the recovery. The implementation then
-        // forces near-cache hits to revalidate for a short grace window
-        // (RECOVERY_GRACE_MS), so even the default NONE strategy picks up the
-        // value written during the outage instead of serving the stale mirror.
+        // The first successful call detects the recovery and clears all local state.
         assertNull(map.getRemote("trigger"));
 
         assertEquals(200L, map.getRemote("key"),
-                "The recovery grace window revalidates near-cache hits even for NONE");
-    }
-
-    @Test
-    void reconnectionStrategyClearDropsTheStaleLocalMirror() {
-        redis.put("key", "100");
-        SimulatedMap map = map("CLEAR");
-        assertEquals(100L, map.getRemote("key"));
-
-        map.available = false;
-        assertNull(map.getRemote("missing"));
-
-        redis.put("key", "200");
-        map.available = true;
-
-        // The successful probe triggers CLEAR before the new value is cached.
-        assertNull(map.getRemote("trigger"));
-
-        assertEquals(200L, map.getRemote("key"),
-                "CLEAR must drop entries written during the outage");
-    }
-
-    @Test
-    void reconnectionStrategyLoadReloadsLazily() {
-        redis.put("key", "100");
-        SimulatedMap map = map("LOAD");
-        assertEquals(100L, map.getRemote("key"));
-
-        map.available = false;
-        assertNull(map.getRemote("missing"));
-
-        redis.put("key", "200");
-        map.available = true;
-
-        assertNull(map.getRemote("trigger"));
-
-        assertEquals(200L, map.getRemote("key"),
-                "LOAD must re-read entries written during the outage");
+                "Recovery must drop entries cached before the outage");
     }
 
     @Test
     void ttlBoundStalenessEvenWithoutInvalidation() throws InterruptedException {
         redis.put("key", "100");
-        SimulatedMap map = new SimulatedMap("test.region.ttl", redis, "NONE", 40L);
+        SimulatedMap map = new SimulatedMap("test.region.ttl", redis, 40L);
 
         assertEquals(100L, map.getRemote("key"));
         assertEquals(1, map.reads);

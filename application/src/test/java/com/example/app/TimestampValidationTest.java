@@ -152,12 +152,32 @@ class TimestampValidationTest {
     }
 
     @Test
-    void unavailableRegistryFallsBackToLocalTier() {
+    void unavailableRegistryForcesDatabaseRead() {
         nodeA.putFromLoad(KEY, "Ada", null);
+        assertEquals("Ada", nodeA.getFromCache(KEY, null));
+
         nodeARegistry.available = false;
 
-        // Redis is down: the local payload is served without a timestamp comparison.
-        assertEquals("Ada", nodeA.getFromCache(KEY, null));
+        // Redis is down: the timestamp cannot prove the payload current, so the
+        // cache must miss and Hibernate reads the database.
+        assertNull(nodeA.getFromCache(KEY, null));
+
+        // The unverifiable payload is evicted, not kept for when Redis returns.
+        nodeARegistry.available = true;
+        assertNull(nodeA.getFromCache(KEY, null));
+    }
+
+    @Test
+    void cacheFillIsSkippedWhileRegistryUnavailable() {
+        nodeARegistry.available = false;
+
+        nodeA.putFromLoad(KEY, "Ada", null);
+
+        // Nothing was cached while the registry was down.
+        assertNull(nodeA.getFromCache(KEY, null));
+
+        nodeARegistry.available = true;
+        assertNull(nodeA.getFromCache(KEY, null));
     }
 
     @Test

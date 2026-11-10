@@ -16,6 +16,7 @@ import org.jboss.logging.Logger;
 import com.hybridcache.runtime.config.HybridCacheConfig;
 
 import io.quarkus.redis.datasource.ReactiveRedisDataSource;
+import io.quarkus.redis.datasource.pubsub.ReactivePubSubCommands;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -40,12 +41,13 @@ import jakarta.inject.Inject;
  *   <li>resets its state when the subscription terminates and retries with a delay;</li>
  *   <li>runs a heartbeat round-trip on the channel, so a silently dead subscription
  *       is detected even when the client does not report the close;</li>
- *   <li>clears every local near-cache once when the gap is detected and once when
- *       the subscription is confirmed live again, so updates missed during the
+ *   <li>always clears every local near-cache once when the gap is detected and once
+ *       when the subscription is confirmed live again, so updates missed during the
  *       outage are re-read from Redis/database instead of being served stale
  *       indefinitely. The clear is intentionally not repeated on every reconnect
- *       attempt: a node running in local-only mode must keep the entries it
- *       cached while Redis was down.</li>
+ *       attempt: a node waiting for Redis must not churn its local state on each
+ *       failed retry; the definitive clear happens when the subscription is
+ *       actually restored.</li>
  * </ul>
  */
 @ApplicationScoped
@@ -72,6 +74,12 @@ public class HybridCachePubSub {
 
     private final ConcurrentHashMap<String, List<Consumer<String>>> listeners = new ConcurrentHashMap<>();
     private final AtomicBoolean reconnectScheduled = new AtomicBoolean();
+    /**
+     * Publish failures are non-fatal (invalidations are an eager-eviction
+     * optimization). The first one is reported at WARN, the rest at DEBUG so a
+     * broker hiccup cannot flood the application log.
+     */
+    private final AtomicBoolean publishFailureReported = new AtomicBoolean();
     /** Invalidates callbacks from an older subscription attempt. */
     private final AtomicLong subscriptionGeneration = new AtomicLong();
     private final ScheduledExecutorService scheduler =
@@ -86,8 +94,7 @@ public class HybridCachePubSub {
      * {@code subscriptionConfirmed} becomes true only once the subscription actually
      * delivers a message (a heartbeat echo is enough). The distinction matters because
      * a connection attempt against a down Redis fails asynchronously: clearing the
-     * near-caches on every retry would evict the entries a local-only node stores
-     * while Redis is unavailable.
+     * near-caches on every retry would churn local state while Redis is unavailable.
      */
     private volatile boolean subscribed = false;
     private volatile boolean subscriptionConfirmed = false;
@@ -105,22 +112,22 @@ public class HybridCachePubSub {
     @Inject
     HybridCacheConfig config;
 
+    /**
+     * Lazily created and then reused: {@code reactiveRedis.pubsub(...)} allocates a
+     * command facade on every call, and both the heartbeat and every invalidation
+     * publish go through here.
+     */
+    private volatile ReactivePubSubCommands<String> pubsubCommands;
+
     private long reconnectDelayMs;
     private long heartbeatIntervalMs;
     private long heartbeatTimeoutMs;
-    /**
-     * Redisson's {@code ReconnectionStrategy.CLEAR}: after the pub/sub topic comes
-     * back, drop the local near-cache so updates missed during the outage are
-     * re-read from Redis.
-     */
-    private boolean clearOnReconnect;
 
     @PostConstruct
     void start() {
         reconnectDelayMs = config.pubsub().reconnectDelayMs();
         heartbeatIntervalMs = config.pubsub().heartbeatIntervalMs();
         heartbeatTimeoutMs = config.pubsub().heartbeatTimeoutMs();
-        clearOnReconnect = config.pubsub().clearOnReconnect();
         heartbeatTask = scheduler.scheduleAtFixedRate(
                 this::heartbeat,
                 heartbeatIntervalMs,
@@ -146,7 +153,7 @@ public class HybridCachePubSub {
             long generation = subscriptionGeneration.incrementAndGet();
             lastHeartbeatAckAt = System.currentTimeMillis();
             try {
-                reactiveRedis.pubsub(String.class)
+                pubsubCommands()
                         .subscribe(CHANNEL)
                         .subscribe().with(
                                 message -> {
@@ -184,8 +191,7 @@ public class HybridCachePubSub {
         if (!outage) {
             // First loss of a working connection: this is the only point where the
             // caches from before the gap have to be dropped. Later retries must not
-            // clear again, otherwise local-only entries stored while Redis is down
-            // would be evicted on every retry.
+            // clear again, otherwise local state would be churned on every retry.
             outage = true;
             recoveryClearPending = true;
             if (failure != null) {
@@ -195,11 +201,9 @@ public class HybridCachePubSub {
                 LOG.warnf("Redis pub/sub subscription ended. Reconnecting in %d ms.",
                         reconnectDelayMs);
             }
-            if (clearOnReconnect) {
-                LOG.warn("Redis pub/sub gap detected; clearing local near-caches once to recover "
-                        + "invalidation messages missed during the outage.");
-                clearAllRegions(RECONNECT_CLEAR);
-            }
+            LOG.warn("Redis pub/sub gap detected; clearing local near-caches once to recover "
+                    + "invalidation messages missed during the outage.");
+            clearAllRegions(RECONNECT_CLEAR);
         } else {
             LOG.debugf("Redis pub/sub reconnect attempt failed: %s",
                     failure == null ? "subscription ended" : failure.toString());
@@ -235,13 +239,67 @@ public class HybridCachePubSub {
         }
         String token = HEARTBEAT_REGION + '|' + instanceId() + '|' + System.nanoTime();
         try {
-            reactiveRedis.pubsub(String.class)
+            pubsubCommands()
                     .publish(CHANNEL, token)
                     .subscribe().with(ignored -> {
                     }, failure -> onHeartbeatPublishFailed(generation, failure));
         } catch (Throwable t) {
             onHeartbeatPublishFailed(generation, t);
         }
+    }
+
+    /**
+     * Publishes an invalidation without blocking the caller.
+     * <p>
+     * Hibernate cache callbacks can be reached from a reactive request thread,
+     * where the blocking {@code RedisDataSource} would throw
+     * {@code BlockingNotAllowedException}. Nothing waits for the result, so a
+     * write never pays a pub/sub round trip.
+     * <p>
+     * A failed publish is logged but does <b>not</b> mark the data connection as
+     * unavailable: a broken/denied PUBLISH must not stop HGET/HSET from working.
+     * Correctness still comes from the Redis timestamp comparison; this message is
+     * only the eager-eviction optimization.
+     */
+    public void publish(String message) {
+        if (closed) {
+            return;
+        }
+        try {
+            pubsubCommands()
+                    .publish(CHANNEL, message)
+                    .subscribe().with(
+                            ignored -> publishFailureReported.set(false),
+                            this::onInvalidationPublishFailed);
+        } catch (Throwable t) {
+            onInvalidationPublishFailed(t);
+        }
+    }
+
+    private void onInvalidationPublishFailed(Throwable failure) {
+        if (publishFailureReported.compareAndSet(false, true)) {
+            LOG.warnf("Failed to publish an invalidation on Redis channel %s (%s). "
+                            + "Peer near-caches can stay stale until the next invalidation, "
+                            + "a reconnect, or the near-cache TTL; further publish failures "
+                            + "are logged at DEBUG.",
+                    CHANNEL, failure.toString());
+        } else {
+            LOG.debugf(failure, "Failed to publish an invalidation on Redis channel %s", CHANNEL);
+        }
+    }
+
+    private ReactivePubSubCommands<String> pubsubCommands() {
+        ReactivePubSubCommands<String> commands = pubsubCommands;
+        if (commands == null) {
+            synchronized (this) {
+                commands = pubsubCommands;
+                if (commands == null) {
+                    commands = reactiveRedis.pubsub(String.class);
+                    pubsubCommands = commands;
+                }
+            }
+        }
+        return commands;
     }
 
     private void onHeartbeatPublishFailed(long generation, Throwable failure) {
@@ -281,11 +339,9 @@ public class HybridCachePubSub {
             if (recoveryClearPending) {
                 recoveryClearPending = false;
                 outage = false;
-                if (clearOnReconnect) {
-                    LOG.warn("Redis pub/sub reconnected; clearing local near-caches once more so "
-                            + "entries cached during the outage are revalidated.");
-                    clearAllRegions(RECONNECT_LIVE_CLEAR);
-                }
+                LOG.warn("Redis pub/sub reconnected; clearing local near-caches once more so "
+                        + "entries cached during the outage are revalidated.");
+                clearAllRegions(RECONNECT_LIVE_CLEAR);
             }
         }
         int separator = message == null ? -1 : message.indexOf('|');

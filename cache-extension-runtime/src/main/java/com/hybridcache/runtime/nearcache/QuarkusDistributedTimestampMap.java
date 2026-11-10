@@ -3,7 +3,6 @@ package com.hybridcache.runtime.nearcache;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hybridcache.runtime.config.HybridCacheConfig;
-import com.hybridcache.runtime.config.ReconnectionStrategy;
 import io.quarkus.arc.Arc;
 import io.quarkus.redis.datasource.RedisDataSource;
 import org.jboss.logging.Logger;
@@ -15,8 +14,7 @@ import java.util.function.Consumer;
 /**
  * Near-cache over the global Redis timestamp hash.
  * <p>
- * The behaviour mirrors Redisson's {@code RLocalCachedMap} with
- * {@code LocalCachedMapOptions.defaults()}:
+ * The behaviour follows the relevant {@code RLocalCachedMap} settings:
  * <ul>
  *   <li>{@code storeMode = LOCALCACHE_REDIS}: the authoritative value lives in Redis,
  *       a local mirror lives in {@link #localMap};</li>
@@ -24,17 +22,19 @@ import java.util.function.Consumer;
  *       nodes drop their local entry;</li>
  *   <li>{@code storeCacheMiss = false}: a Redis miss is never remembered locally;</li>
  *   <li>{@code timeToLive = 0}, {@code maxIdle = 0}, {@code cacheSize = 0}: the local
- *       mirror does not expire or evict on this level;</li>
- *   <li>{@code reconnectionStrategy = NONE} by default (see
- *       {@code quarkus.hybrid-cache.near-cache.reconnection-strategy}).</li>
+ *       mirror does not expire or evict on this level (unless
+ *       {@code quarkus.hybrid-cache.near-cache.ttl-ms} is configured);</li>
+ *   <li>after any Redis or pub/sub outage, the local mirror is always cleared; there
+ *       is no opt-out, because entries cached while the timestamp registry was
+ *       unreachable cannot be proven current.</li>
  * </ul>
  * A repeated read therefore needs no Redis round trip: only the first read of a key,
  * the first read after an invalidation, and writes talk to Redis.
  * <p>
- * This intentionally gives Redisson's eventual consistency: if an invalidation message
- * is lost (pub/sub disabled or disconnected) and the reconnection strategy is
- * {@code NONE}, the near-cache can serve a stale value until the entry is invalidated
- * or the node reconnects with a clearing strategy.
+ * This intentionally gives eventual consistency while pub/sub is healthy: if an
+ * invalidation message is lost, the near-cache can serve a stale value until the entry
+ * is invalidated or the configured near-cache TTL expires. An outage always clears the
+ * local mirror on recovery.
  */
 public class QuarkusDistributedTimestampMap implements TimestampRegistry {
 
@@ -64,7 +64,6 @@ public class QuarkusDistributedTimestampMap implements TimestampRegistry {
     private static final long DEFAULT_RECOVERY_GRACE_MS = 8_000L;
 
     private final String regionName;
-    private final ReconnectionStrategy reconnectionStrategy;
     private final long nearCacheTtlMs;
     private final long recoveryGraceMs;
     private final long retryDelayMs;
@@ -82,6 +81,8 @@ public class QuarkusDistributedTimestampMap implements TimestampRegistry {
     private volatile RedisDataSource redis;
     private volatile ObjectMapper mapper = DEFAULT_MAPPER;
     private volatile Consumer<String> invalidationListener;
+    /** Shared owner of the pub/sub channel; set during {@link #init()}. */
+    private volatile HybridCachePubSub pubsub;
     private volatile boolean subscribed = false;
     private volatile boolean initialized = false;
     private volatile boolean remoteAvailable = true;
@@ -109,7 +110,7 @@ public class QuarkusDistributedTimestampMap implements TimestampRegistry {
      * that {@code quarkus.hybrid-cache.*} is honoured.
      */
     public QuarkusDistributedTimestampMap(String regionName) {
-        this(regionName, ReconnectionStrategy.NONE, 0L,
+        this(regionName, 0L,
                 DEFAULT_RECOVERY_GRACE_MS, true, DEFAULT_RETRY_DELAY_MS);
     }
 
@@ -118,7 +119,6 @@ public class QuarkusDistributedTimestampMap implements TimestampRegistry {
      */
     public QuarkusDistributedTimestampMap(String regionName, HybridCacheConfig config) {
         this(regionName,
-                config.nearCache().reconnectionStrategy(),
                 config.nearCache().ttlMs(),
                 config.nearCache().recoveryGraceMs(),
                 config.pubsub().enabled(),
@@ -126,13 +126,11 @@ public class QuarkusDistributedTimestampMap implements TimestampRegistry {
     }
 
     private QuarkusDistributedTimestampMap(String regionName,
-                                           ReconnectionStrategy reconnectionStrategy,
                                            long nearCacheTtlMs,
                                            long recoveryGraceMs,
                                            boolean pubsubEnabled,
                                            long retryDelayMs) {
         this.regionName = regionName;
-        this.reconnectionStrategy = reconnectionStrategy;
         this.nearCacheTtlMs = Math.max(0L, nearCacheTtlMs);
         this.recoveryGraceMs = Math.max(0L, recoveryGraceMs);
         this.pubsubEnabled = pubsubEnabled;
@@ -141,13 +139,8 @@ public class QuarkusDistributedTimestampMap implements TimestampRegistry {
         this.localMapFetchedAt = new ConcurrentHashMap<>();
     }
 
-    QuarkusDistributedTimestampMap(String regionName, String reconnectionStrategy) {
-        this(regionName, ReconnectionStrategy.parse(reconnectionStrategy), 0L,
-                DEFAULT_RECOVERY_GRACE_MS, true, DEFAULT_RETRY_DELAY_MS);
-    }
-
-    QuarkusDistributedTimestampMap(String regionName, String reconnectionStrategy, long nearCacheTtlMs) {
-        this(regionName, ReconnectionStrategy.parse(reconnectionStrategy), nearCacheTtlMs,
+    QuarkusDistributedTimestampMap(String regionName, long nearCacheTtlMs) {
+        this(regionName, nearCacheTtlMs,
                 DEFAULT_RECOVERY_GRACE_MS, true, DEFAULT_RETRY_DELAY_MS);
     }
 
@@ -173,7 +166,7 @@ public class QuarkusDistributedTimestampMap implements TimestampRegistry {
                     .instance(HybridCacheRedisProvider.class).get();
             if (provider == null) {
                 remoteAvailable = false;
-                LOG.warnf("Redis clients are not available; region %s will run in local-only mode.", regionName);
+                LOG.warnf("Redis clients are not available; region %s will operate without the timestamp registry.", regionName);
                 return;
             }
             this.redis = provider.redisDataSource();
@@ -199,13 +192,16 @@ public class QuarkusDistributedTimestampMap implements TimestampRegistry {
         if (subscribed) {
             return;
         }
-        HybridCachePubSub pubsub = Arc.container().instance(HybridCachePubSub.class).get();
-        if (pubsub == null) {
+        HybridCachePubSub shared = Arc.container().instance(HybridCachePubSub.class).get();
+        if (shared == null) {
             LOG.warnf("Shared pub/sub subscriber is not available; region %s will not receive "
                     + "invalidation events.", regionName);
             return;
         }
-        pubsub.register(regionName, this::onPubSubMessage);
+        // Store it before registering: even if registration fails, writes should
+        // still be able to publish invalidations to peers.
+        this.pubsub = shared;
+        shared.register(regionName, this::onPubSubMessage);
         subscribed = true;
     }
 
@@ -282,15 +278,15 @@ public class QuarkusDistributedTimestampMap implements TimestampRegistry {
     }
 
     protected void publishMessage(String message) {
-        RedisDataSource source = redis;
-        if (source == null) {
+        HybridCachePubSub shared = pubsub;
+        if (shared == null) {
+            // Pub/sub disabled, or the shared subscriber is unavailable. The data
+            // path must keep working without it.
             return;
         }
-        try {
-            source.pubsub(String.class).publish(HybridCachePubSub.CHANNEL, message);
-        } catch (Exception e) {
-            markRemoteFailure("PUBLISH", e);
-        }
+        // HybridCachePubSub owns the channel: it publishes on the reactive client,
+        // asynchronously, and keeps publish health separate from the data path.
+        shared.publish(message);
     }
 
     /**
@@ -342,7 +338,7 @@ public class QuarkusDistributedTimestampMap implements TimestampRegistry {
 
     /**
      * @return whether Redis was usable for the most recent operation. {@code false} means
-     *         callers should fall back to the local tier.
+     *         callers cannot validate local state and must fail closed.
      */
     public boolean isRemoteAvailable() {
         init();
@@ -441,25 +437,14 @@ public class QuarkusDistributedTimestampMap implements TimestampRegistry {
     }
 
     /**
-     * Applies Redisson's {@code ReconnectionStrategy} on the transition from an
-     * unavailable Redis back to a usable one.
-     * <ul>
-     *   <li>{@code NONE}: keep the local mirror (can stay stale after an outage);</li>
-     *   <li>{@code CLEAR}: drop the local mirror so entries are re-read from Redis;</li>
-     *   <li>{@code LOAD}: like {@code CLEAR} but reloaded lazily on the next read.</li>
-     * </ul>
+     * Always runs on the transition from an unavailable Redis back to a usable one.
+     * An entry cached while the timestamp registry was unreachable cannot be proven
+     * current, so keeping the local mirror would allow stale reads indefinitely.
      */
-    protected void applyReconnectionStrategy() {
-        switch (reconnectionStrategy) {
-            case CLEAR, LOAD -> {
-                clearNearCache();
-                notifyInvalidation(null);
-                LOG.infof("Redis reconnected for region %s; local near-cache cleared (%s).",
-                        regionName, reconnectionStrategy);
-            }
-            default -> LOG.debugf("Redis reconnected for region %s; keeping near-cache (NONE).",
-                    regionName);
-        }
+    protected void clearLocalStateOnRecovery() {
+        clearNearCache();
+        notifyInvalidation(null);
+        LOG.infof("Redis reconnected for region %s; local near-cache cleared.", regionName);
     }
 
     private void nearCachePut(String key, Object value) {
@@ -499,7 +484,7 @@ public class QuarkusDistributedTimestampMap implements TimestampRegistry {
     /**
      * @return true during the short window after a pub/sub reconnect in which local
      *         hits are not trusted. Only forces a revalidation when Redis is usable;
-     *         otherwise a node in local-only mode would turn every read into a failed
+     *         otherwise a node without Redis would turn every read into a failed
      *         network call.
      */
     private boolean mustRevalidate() {
@@ -517,7 +502,7 @@ public class QuarkusDistributedTimestampMap implements TimestampRegistry {
         if (!remoteAvailable) {
             remoteAvailable = true;
             redisFailureReported = false;
-            applyReconnectionStrategy();
+            clearLocalStateOnRecovery();
             // Redis is usable again. Besides the pub/sub-driven window, arm a local
             // revalidation window so the first reads after a data-connection recovery
             // do not trust near-cache entries cached while invalidations were lost.
@@ -530,7 +515,7 @@ public class QuarkusDistributedTimestampMap implements TimestampRegistry {
     /**
      * Detects the transition from an unavailable Redis back to a usable one on the
      * near-cache hot path. Without this, a node whose reads are all local would never
-     * notice the recovery and {@code CLEAR}/{@code LOAD} would never run.
+     * notice the recovery and the local state would never be cleared.
      */
     private void maybeRecover() {
         if (remoteAvailable || redis == null || System.currentTimeMillis() < retryAt) {
@@ -585,8 +570,8 @@ public class QuarkusDistributedTimestampMap implements TimestampRegistry {
         retryAt = System.currentTimeMillis() + retryDelayMs;
         if (!redisFailureReported) {
             redisFailureReported = true;
-            LOG.warnf("Redis %s failed for region %s (%s). Continuing in local-only mode; "
-                            + "further Redis failures for this region are logged at DEBUG.",
+            LOG.warnf("Redis %s failed for region %s (%s). Cache reads will go to the "
+                            + "database; further Redis failures for this region are logged at DEBUG.",
                     operation, regionName, failure.toString());
         } else {
             LOG.debugf(failure, "Redis %s failed for region %s", operation, regionName);

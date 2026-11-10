@@ -39,8 +39,8 @@ public interface HybridCacheConfig {
 
         /**
          * Whether cross-node invalidation over Redis pub/sub is enabled. Disabling it
-         * keeps the cache functional but leans on timestamps and the reconnection
-         * strategy for coherence.
+         * keeps the cache functional but leans on timestamps and the near-cache TTL
+         * for coherence; stale reads are possible until that TTL expires.
          */
         @WithDefault("true")
         boolean enabled();
@@ -62,22 +62,9 @@ public interface HybridCacheConfig {
          */
         @WithDefault("6000")
         long heartbeatTimeoutMs();
-
-        /**
-         * Whether the local near-caches are cleared when a pub/sub gap is detected and
-         * when the subscription is confirmed live again.
-         */
-        @WithDefault("true")
-        boolean clearOnReconnect();
     }
 
     interface NearCacheConfig {
-
-        /**
-         * What to do with the local timestamp mirror after Redis becomes reachable again.
-         */
-        @WithDefault("NONE")
-        ReconnectionStrategy reconnectionStrategy();
 
         /**
          * Optional safety net: after this many milliseconds a near-cache entry is treated
@@ -98,7 +85,7 @@ public interface HybridCacheConfig {
 
         /**
          * Cooldown before retrying Redis after a failed command, during which cache reads
-         * are served from the local tier only.
+         * fail closed and go to the database.
          */
         @WithDefault("5000")
         long retryDelayMs();

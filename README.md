@@ -1,7 +1,7 @@
 # Hybrid Distributed Second-Level Cache for Quarkus
 
 A Quarkus extension that replaces Hibernate ORM's second-level cache with a
-two-tier design:
+three-tier design:
 
 - **Tier 1 — local near-cache (JVM heap):** per-key timestamps mirrored from Redis,
   served without a network round trip on the hot path.
@@ -10,8 +10,8 @@ two-tier design:
 - **Tier 3 — local payload cache:** Caffeine with Window TinyLFU eviction.
 
 Cross-node coherence comes from timestamp comparison plus Redis pub/sub
-invalidation. When Redis is unavailable the application keeps working from the
-local tier in a degraded (eventual) mode.
+invalidation. When Redis is unavailable, cache reads fail closed to the database:
+the timestamp registry cannot prove a local payload current, so none is served.
 
 ```
 read  → local timestamp hit? ──yes──→ local payload hit? ──yes──→ return (0 network hops)
@@ -68,8 +68,6 @@ All properties are runtime configuration and live under the
 | `quarkus.hybrid-cache.pubsub.reconnect-delay-ms` | `2000` | Delay before retrying a lost pub/sub subscription |
 | `quarkus.hybrid-cache.pubsub.heartbeat-interval-ms` | `2000` | Heartbeat interval used to detect a dead subscription |
 | `quarkus.hybrid-cache.pubsub.heartbeat-timeout-ms` | `6000` | Heartbeat timeout before the subscription is considered lost |
-| `quarkus.hybrid-cache.pubsub.clear-on-reconnect` | `true` | Clear local near-caches when a pub/sub gap is detected/recovered |
-| `quarkus.hybrid-cache.near-cache.reconnection-strategy` | `NONE` | `NONE`, `CLEAR` or `LOAD` (Redisson semantics) |
 | `quarkus.hybrid-cache.near-cache.ttl-ms` | `0` | Optional staleness bound; `0` disables it |
 | `quarkus.hybrid-cache.near-cache.recovery-grace-ms` | `8000` | Force revalidation of near-cache hits after a reconnect; `0` disables it |
 | `quarkus.hybrid-cache.redis.retry-delay-ms` | `5000` | Cooldown before retrying Redis after a failed command |
@@ -79,10 +77,13 @@ All properties are runtime configuration and live under the
 Example `application.properties`:
 
 ```properties
-quarkus.hybrid-cache.near-cache.reconnection-strategy=CLEAR
 quarkus.hybrid-cache.near-cache.ttl-ms=30000
 quarkus.hybrid-cache.storage.maximum-size=20000
 ```
+
+Local cache state is always discarded on recovery. There is deliberately no
+option to keep it: entries cached while the timestamp registry was unreachable
+cannot be proven current, so keeping them would allow stale reads.
 
 ## Usage
 
@@ -103,7 +104,10 @@ quarkus.hibernate-orm.second-level-caching-enabled=true
 
 - Reads are eventually consistent: an invalidation is delivered over pub/sub, and
   timestamps are compared before a local payload is returned.
-- Redis failures switch the node to local-only mode after a short cooldown.
+- Redis failures fail closed: after a short cooldown the node serves entity reads
+  from the database instead of the local payload tier.
+- Any Redis or pub/sub recovery clears all local timestamp and payload state.
+  There is no mode that keeps entries cached during an outage.
 - Pub/sub gaps clear the local near-caches once and force revalidation for
   `near-cache.recovery-grace-ms` so writes missed during the outage are re-read.
 - `syncStrategy = INVALIDATE`, `storeCacheMiss = false`: a Redis miss is never

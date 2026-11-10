@@ -49,9 +49,17 @@ public abstract class AbstractTimestampAwareStorage implements DomainDataStorage
      */
     private void onRemoteInvalidation(String key) {
         if (key == null) {
-            localDataStorage.evictData();
-            localTimestamps.clear();
-            locallyLockedKeys.clear();
+            // Deliberately keep the payload and SoftLock ownership of keys this node
+            // is mutating: a recovery broadcast can arrive while this node is inside a
+            // READ_WRITE transaction. Evicting the pending value here would lose the
+            // write, and forgetting the ownership would make the next validation treat
+            // this node's own distributed marker as a peer's lock.
+            if (localDataStorage instanceof CaffeineStorageAccess caffeineStorage) {
+                caffeineStorage.evictDataExcept(locallyLockedKeys);
+            } else {
+                localDataStorage.evictData();
+            }
+            localTimestamps.keySet().retainAll(locallyLockedKeys);
             return;
         }
         localTimestamps.remove(key);
@@ -103,8 +111,11 @@ public abstract class AbstractTimestampAwareStorage implements DomainDataStorage
         }
 
         if (!remoteKeyTimestampCache.isRemoteAvailable()) {
-            // Redis is unusable: run from the local tier only (best effort).
-            return null;
+            // The timestamp registry is the only authority that can prove a payload is
+            // current. Without it, fail closed: evict the local payload and let
+            // Hibernate read the database.
+            evictLocal(cacheKey, key);
+            return new DistributedCacheLockWrapper(null);
         }
 
 
@@ -175,19 +186,27 @@ public abstract class AbstractTimestampAwareStorage implements DomainDataStorage
                                SharedSessionContractImplementor session, Object remoteTimeStamp) {
         String cacheKey = getCacheKey(key);
 
-        if (remoteKeyTimestampCache.isRemoteAvailable()) {
-            if (remoteKeyTimestampCache.isLockMarker(remoteTimeStamp)) {
-                // A lock (from any node) is present; do not cache the value we just read.
-                evictLocal(cacheKey, key);
-                return;
-            }
-            if (remoteTimeStamp instanceof Number) {
-                localDataStorage.putIntoCache(key, value, session);
-                localTimestamps.put(cacheKey, ((Number) remoteTimeStamp).longValue());
-                return;
-            }
+        if (!remoteKeyTimestampCache.isRemoteAvailable()) {
+            // Reads fail closed while the registry is unavailable, so caching this
+            // payload would only leave unverifiable state behind for the recovery
+            // clear to remove. Do not populate the local tier.
+            evictLocal(cacheKey, key);
+            return;
         }
 
+        if (remoteKeyTimestampCache.isLockMarker(remoteTimeStamp)) {
+            // A lock (from any node) is present; do not cache the value we just read.
+            evictLocal(cacheKey, key);
+            return;
+        }
+        if (remoteTimeStamp instanceof Number) {
+            localDataStorage.putIntoCache(key, value, session);
+            localTimestamps.put(cacheKey, ((Number) remoteTimeStamp).longValue());
+            return;
+        }
+
+        // The key has no timestamp yet; mint one so the payload can be validated
+        // by this and other nodes.
         localDataStorage.putIntoCache(key, value, session);
         updateTimeStampInAll(key, value);
     }
@@ -234,8 +253,15 @@ public abstract class AbstractTimestampAwareStorage implements DomainDataStorage
 
         if (locallyLockedKeys.remove(cacheKey)) {
             // A committed value arrived while this node held the lock: publish it now.
-            localDataStorage.putIntoCache(key, value, session);
-            updateTimeStampInAll(key, value);
+            if (remoteKeyTimestampCache.isRemoteAvailable()) {
+                localDataStorage.putIntoCache(key, value, session);
+                updateTimeStampInAll(key, value);
+            } else {
+                // The new timestamp cannot be published, so the payload is not
+                // verifiable anywhere. Leave the local tier empty.
+                localDataStorage.evictData(key);
+                localTimestamps.remove(cacheKey);
+            }
             return;
         }
 
