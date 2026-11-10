@@ -38,7 +38,7 @@
 11. [Phase 10 — Failure modes](#phase-10--failure-modes)
 12. [Deployment topologies](#deployment-topologies-standalone--sentinel--cluster)
 13. [Call-count summary](#call-count-summary)
-14. [60-second version](#the-60-second-version-for-your-audience)
+14. [60-second summary](#the-60-second-summary)
 15. [Assumptions and caveats](#assumptions-and-caveats)
 16. [Running and testing](#running-and-testing)
 
@@ -694,26 +694,27 @@ What happens when it fills depends on the server config:
 Operational notes:
 
 - In a Redis Cluster, a region is **one hash = one key = one slot**, so a large
-  region cannot be spread across shards. Shard the hash manually
-  (`region:0..N`) or store one key per entry if you need to scale out.
-- `evictData()` uses `DEL <region>`; on a multi-million-field hash that blocks
-  Redis while it frees memory. Use `UNLINK`.
+  region cannot be spread across shards. Scaling out therefore requires manual
+  hash sharding (`region:0..N`) or one key per entry.
+- `evictData()` uses `DEL <region>`; on a multi-million-field hash this blocks
+  Redis while it frees memory. `UNLINK` is the non-blocking alternative.
 - If `AOF`/`RDB`/replicas are enabled, the dataset is duplicated 2–3×.
 
 Mitigations, cheapest first:
 
-1. Set `maxmemory` + `allkeys-lru` and alert at ~70 %; never run unlimited
-   with `noeviction`.
-2. Use `HEXPIRE` on write (Redis ≥ 7.4; this container is 8.10.2) to expire
-   entity timestamps after a few hours, and refresh on write. Do **not** TTL the
-   query timestamps region (it is small and its absence makes caches look fresh).
-3. Add a Caffeine `removalListener` that `HDEL`s the key on size eviction — ties
-   Redis to the working set, at the cost of cross-pod reload churn.
-4. Avoid L2 caching for bulk scans (cache only hot entities), which is the real
-   source of key cardinality.
-5. If this is still too much, switch the invalidation grain from per-key to
-   per-region (one timestamp per region): O(regions) in Redis, at the cost of
-   invalidating the whole region on every write.
+1. A `maxmemory` limit with `allkeys-lru` and an alert at ~70 % is recommended;
+   running unlimited with `noeviction` must be avoided.
+2. `HEXPIRE` on write (Redis ≥ 7.4; this container is 8.10.2) can expire entity
+   timestamps after a few hours and refresh them on write. The query timestamps
+   region must **not** be TTLed (it is small, and its absence makes caches look
+   fresh).
+3. A Caffeine `removalListener` that `HDEL`s the key on size eviction ties Redis
+   to the working set, at the cost of cross-pod reload churn.
+4. L2 caching for bulk scans should be avoided (only hot entities should be
+   cached); bulk scans are the real source of key cardinality.
+5. If this is still too much, the invalidation grain can be switched from
+   per-key to per-region (one timestamp per region): O(regions) in Redis, at the
+   cost of invalidating the whole region on every write.
 
 ---
 
@@ -748,7 +749,7 @@ quarkus.hybrid-cache.near-cache.ttl-ms=30000
   to pub/sub subscriptions**. On failover the subscription dies and the
   extension's heartbeat (2 s interval, 6 s timeout) detects it, clears the near
   caches, re-subscribes and forces revalidation for `recoveryGraceMs` (8 s).
-  Expect an ~8 s window of database reads, not stale data.
+  The expected result is an ~8 s window of database reads, not stale data.
 - Replication is asynchronous: a promoted replica may be missing the last
   timestamp writes. Because every pod detects the pub/sub break and revalidates,
   the entry is reloaded from the database; size the RPO with
@@ -807,12 +808,12 @@ cache SPI is synchronous.
 
 ---
 
-## The 60-second version for your audience
+## The 60-second summary
 
 1. **Build:** the extension replaces Hibernate's region factory and wires
    Redis + Hibernate.
-2. **Startup:** per cache region we build a Caffeine payload cache and a
-   timestamp map; Redis connects lazily on first use.
+2. **Startup:** per cache region the extension builds a Caffeine payload cache
+   and a timestamp map; Redis connects lazily on first use.
 3. **First read:** global timestamp is missing → miss → load from DB → store
    payload locally and write the timestamp to Redis (and broadcast).
 4. **Second read:** compare the local timestamp with the mirror of the global
